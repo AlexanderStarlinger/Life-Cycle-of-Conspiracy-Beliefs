@@ -1,0 +1,3078 @@
+---
+title: "OBL_MasterFile"
+author: "Alexander Starlinger"
+date: "12 August 2022"
+output: html_document
+---
+
+# Setup and Preparation 
+
+## Packages
+
+Check for needed packages and install them if not already done. Define function that takes list of packages.
+
+```{r function for package import and load, include=FALSE}
+
+using <-function(...) {
+    libs<-unlist(list(...))
+    req<-unlist(lapply(libs,require,character.only=TRUE))
+    need<-libs[req==FALSE]
+    n<-length(need)
+    if(n>0){
+        libsmsg<-if(n>2) paste(paste(need[1:(n-1)],collapse=", "),",",sep="") else need[1]
+        print(libsmsg)
+        if(n>1){
+            libsmsg<-paste(libsmsg," and ", need[n],sep="")
+        }
+        libsmsg<-paste("The following packages could not be found: ",libsmsg,"\n\r\n\rInstall missing packages?",collapse="")
+        if(winDialog(type = c("yesno"), libsmsg)=="YES"){       
+            install.packages(need)
+            lapply(need,require,character.only=TRUE)
+        }
+    }
+}
+
+```
+
+```{r Load packages}
+
+install.packages("lavaanExtra", repos = c(
+  rempsyc = "https://rempsyc.r-universe.dev",
+  CRAN = "https://cloud.r-project.org"))
+
+
+using("haven", #import/export
+      "ggplot2", "tidyverse", "ggpubr", #tidyverse stuff
+      "lavaan", "semTools",  "stringr", "lavaanExtra", "tidySEM", "rempsyc", #SEM
+      "rstatix", "car", "labelled", #addons
+      "emmeans", "lme4", "lmerTest", "ggResidpanel", "plyr", "dplyr") #MLMs
+
+
+```
+
+## Data import
+
+```{r Load data}
+
+setwd("//fs.univie.ac.at/homedirs/alexanders96/Desktop/NEU/Datenfiles_und_Syntax")
+data.obl <- read_sav("OBL_neu_aufbereitet.sav")
+
+data.obl <- data.obl %>%
+              mutate(age_group = if_else(age < median(age, na.rm = TRUE),
+                                         age_group <- "0",
+                                         age_group <- "1"),
+                     education_group = if_else(highest_education <= median(highest_education),
+                                         education_group <- "0",
+                                         education_group <- "1"))
+
+
+
+
+data.obl <- mutate_at(data.obl, vars(sex, year,
+education_group, age_group), as.factor)
+
+
+#umgang mit sozDem: year als factor, 
+#Rest als numeric (weil nur als exogene vars im model)
+#recode year als 1, 2 damit fuer MG beide grafiken ausgegeben werden
+
+data.obl <- mutate_at(data.obl, vars (sex, highest_education), as.numeric)
+data.obl$year <- as.factor(data.obl$year)
+data.obl$year <- recode_factor(data.obl$year, "0" = "1", "1" = "2")
+
+glimpse(data.obl)
+
+
+
+# new df with relevant scales and so on
+
+data <- data.obl %>%
+  select(year, sex, age, highest_education, media_T1, media_T2,
+         contains("mean"))
+
+
+#also: make seperate objects for T1 and T2 scales
+
+scales_T1 <- data %>%
+  select(contains("T1"))
+
+scales_T2 <- data %>%
+  select(contains("T2"))
+
+```
+
+
+# RH1 MI Tests of OBLQ and BCTI
+
+--------------------- ALLGEMEINE ANMERKUNGEN MG-CFA --------------------------
+
+a) zu measEq.syntax:
+
+generiert lavaan model syntax mit folgenden spezifikationen (ausgabe unter summary(objekt))
+
+This lavaan model syntax specifies a CFA with 30 manifest indicators (30 of which are ordinal) 
+of 1 common factor(s).
+To identify the location and scale of each common factor, the factor means and variances were fixed 
+to 0 and 1, respectively, unless equality constraints on measurement parameters 
+allow them to be freed.
+The location and scale of each latent item-response underlying 30 ordinal indicators 
+were identified using the "delta" parameterization, and the identification constraints 
+recommended by Wu & Estabrook (2016).
+
+
+b) zu MG-CFA mit ordinalen Daten:
+
+Svetina et al. geben in Anlehnung an Wu & Estabrook Reihenfolge:
+
+Baseline -> Threshold equality -> Threshold + Loading equality vor
+
+
+
+Tipps:
+
+1) constraints in model ansehen:
+
+cat(oblq_cohort.config.model) 
+
+
+
+## OBLQ 
+
+### Baseline Model + Vgl. DWLS vs. MLR
+
+Als erstes Matrix fuer results erstellen - wird dann nach und nach befuellt.
+
+```{r OBLQ Model Matrix}
+
+oblq.model.results <- matrix(NA, nrow = 17, ncol = 7)
+oblq.model.results
+
+#beschriften
+
+colnames(oblq.model.results) <- c("chisquare", "df",
+                             "pvalue", "CLI", "TLI", "RMSEA", "SRMR")
+
+
+rownames(oblq.model.results) <- c("Baseline.MLR", "Baseline.DWLS",
+                             "Cohort.config", "Cohort.T", "Cohort.T+L",
+                             "Education.config", "Education.T", "Education.T+L",
+                             "Age.config", "Age.T", "Age.T+L", 
+                             "Sex.config", "Sex.T", "Sex.T+L",
+                             "Long.config", "Long.T", "Long.T+L")
+
+
+
+
+
+```
+
+
+```{r OBLQ Baseline}
+
+OBL.baseline <-
+  
+  'OBL =~ OBLQ01 + OBLQ02 + OBLQ03 + OBLQ04 + OBLQ05 + OBLQ06 +  OBLQ08 + OBLQ09 + OBLQ10 + 
+  OBLQ11 + OBLQ12 + OBLQ13 + OBLQ14 + OBLQ15 + OBLQ16 + OBLQ17 + OBLQ18 + OBLQ19 + OBLQ20 + OBLQ21 
+  + OBLQ22 + OBLQ23 + OBLQ24 + OBLQ25 + OBLQ26 + OBLQ27 + OBLQ28 + OBLQ29 + OBLQ30'
+
+
+#1) mit DWLS
+
+
+OBL.baseline.fit.DWLS <- cfa(OBL.baseline, 
+                             ordered = TRUE, 
+                             missing = "pairwise",
+                             data = data.obl, 
+                             estimator = "DWLS",
+                             parameterization = "delta",
+                             )
+
+
+summary(OBL.baseline.fit.DWLS, fit.measures = TRUE, standardized = TRUE)
+
+
+
+#2) mit MLR
+
+
+
+OBL.baseline.fit.MLR <- cfa(OBL.baseline, data = data.obl, estimator = "MLR")
+
+summary(OBL.baseline.fit.MLR, fit.measures = TRUE, standardized = TRUE)
+
+
+
+# Matrix befuellen
+
+  # MLR
+
+oblq.model.results[1, ] <- round(data.matrix(fitmeasures(OBL.baseline.fit.MLR, 
+                                                    fit.measures = 
+                                                      c("chisq", "df",
+                                                        "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                            digits = 3)
+
+
+  # DWLS
+
+oblq.model.results[2, ] <- round(data.matrix(fitmeasures(OBL.baseline.fit.DWLS, 
+                                                    fit.measures = 
+                                                      c("chisq", "df",
+                                                        "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                            digits = 3)
+
+
+oblq.model.results #muss mit DWLS geschaetzt werden!
+
+
+
+```
+
+### Kohorten: 2011 vs. 2021
+
+Neues Baseline Model definieren: Items mit zusammengelegten Item-Kategorien (OBLQ_k).
+In separaten Chunk machen, weil ueberall verwendet (fuer uebersicht).
+
+```{r OBLQ MG-CFA Baseline Model Syntax}
+
+obl.model.cat <- 
+  
+  'OBL =~ OBLQ01 + OBLQ02 + OBLQ03_k + OBLQ04_k + OBLQ05 + OBLQ06_k + OBLQ07_k + OBLQ08 + 
+        OBLQ09_k + OBLQ10 + OBLQ11 + OBLQ12_k + OBLQ13_k + OBLQ14_k + OBLQ15 + OBLQ16_k + 
+        OBLQ17 + OBLQ18 + OBLQ19_k + OBLQ20_k + OBLQ21_k + OBLQ22_k + OBLQ23 + OBLQ24_k + 
+        OBLQ25_k + OBLQ26_k + OBLQ27 + OBLQ28_k + OBLQ29_k + OBLQ30'
+
+
+
+```
+
+Anmerkung: Alle Tests mit einer Gruppierungsvariable sind in einem Chunk. Der enthaelt:
+
+a) die jeweiligen Modelle (syntax, fit (+ in results speichern), summary)
+b) LR-Tests
+
+
+```{r OBLQ MG-CFA year}
+
+
+# config
+
+oblq_cohort.config <- measEq.syntax(obl.model.cat,
+                                 data.obl,
+                                 ordered = TRUE,
+                                 parameterization = "delta",    
+                                 meanstructure = TRUE,
+                                 ID.fac = "std.lv",              
+                                 ID.cat = "Wu",
+                                 group = "year",
+                                 group.equal = "configural") 
+
+
+oblq_cohort.config.model <- as.character(oblq_cohort.config) #um cfa() zu uebergeben
+
+
+#fitten
+
+oblq_cohort_config.fit <- cfa(oblq_cohort.config.model, 
+                           data.obl,
+                           group = "year",
+                           ordered = TRUE)
+
+
+summary(oblq_cohort_config.fit, 
+        standardized = TRUE,
+        rsquare = TRUE)
+
+
+oblq.model.results[3, ] <- round(data.matrix(fitmeasures(oblq_cohort_config.fit, 
+                                                    fit.measures = 
+                                                      c("chisq", "df",
+                                                        "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                            digits = 3)
+
+
+##2. model mit threshold invariance ##
+
+oblq_cohort.threshold <- measEq.syntax(obl.model.cat,
+                                 data.obl,
+                                 ordered = TRUE,
+                                 meanstructure = TRUE,
+                                 parameterization = "delta",     #default: theta!
+                                 ID.fac = "std.lv",              #ist default
+                                 ID.cat = "Wu",   #ist default
+                                 group = "year",
+                                 group.equal = c("thresholds")) 
+
+
+
+oblq_cohort_threshold.model <- as.character(oblq_cohort.threshold)
+
+
+#fitten
+
+oblq_cohort_threshold.fit <- cfa(oblq_cohort_threshold.model, 
+                            data.obl,
+                            group = "year",
+                            ordered = TRUE)
+
+summary(oblq_cohort_threshold.fit, standardized = TRUE)
+
+
+
+#matrix fuellen
+
+
+oblq.model.results[4, ] <- round(data.matrix(fitmeasures(oblq_cohort_threshold.fit, 
+                                                    fit.measures = 
+                                                      c("chisq", "df",
+                                                        "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                            digits = 3)
+
+
+#chi-square statistics
+
+lavTestLRT(oblq_cohort_config.fit, oblq_cohort_threshold.fit)
+
+
+
+
+#3. threshold + loadings
+
+oblq_cohort_loadings <- measEq.syntax(obl.model.cat,
+                                  data.obl,
+                                  ordered = TRUE,
+                                  meanstructure = TRUE,
+                                  parameterization = "delta",     #default: theta!
+                                  ID.fac = "std.lv",              #ist default
+                                  ID.cat = "Wu",   #ist default
+                                  group = "year",
+                                  group.equal = c("thresholds", "loadings")) 
+
+
+
+oblq_cohort_loadings.model <- as.character(oblq_cohort_loadings)
+
+
+#fitten
+
+oblq_cohort_loadings.fit <- cfa(oblq_cohort_loadings.model, 
+                            data.obl,
+                            group = "year",
+                            ordered = TRUE)
+
+summary(oblq_cohort_loadings.fit, standardized = TRUE, fit.measures = TRUE)
+
+
+#matrix fuellen
+
+
+oblq.model.results[5, ] <- round(data.matrix(fitmeasures(oblq_cohort_loadings.fit, 
+                                                    fit.measures = 
+                                                      c("chisq", "df",
+                                                        "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                            digits = 3)
+
+oblq.model.results
+
+
+#chi-square statistics
+
+lavTestLRT(oblq_cohort_threshold.fit, oblq_cohort_loadings.fit) 
+
+```
+
+### Education: low vs. high 
+
+
+```{r OBLQ MG CFA: education}
+
+#baseline
+
+oblq_education_config <- measEq.syntax(obl.model.cat,
+                                 data.obl,
+                                 ordered = TRUE,
+                                 parameterization = "delta",     
+                                 ID.fac = "std.lv",              
+                                 ID.cat = "Wu",   
+                                 group = "education_group",
+                                 group.equal = "configural") 
+
+
+oblq_education_config.model <- as.character(oblq_education_config) 
+
+
+
+#fitten
+
+oblq_education_config.fit <- cfa(oblq_education_config.model, 
+                           data.obl,
+                           group = "education_group",
+                           ordered = TRUE)
+
+
+summary(oblq_education_config.fit, 
+        standardized = TRUE,
+        rsquare = TRUE)
+
+
+oblq.model.results[6, ] <- round(data.matrix(fitmeasures(oblq_education_config.fit, 
+                                                    fit.measures = 
+                                                      c("chisq", "df",
+                                                        "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                            digits = 3)
+
+
+##2. model mit threshold invariance ##
+
+oblq_education_threshold <- measEq.syntax(obl.model.cat,
+                                  data.obl,
+                                  ordered = TRUE,
+                                  parameterization = "delta",     #default: theta!
+                                  ID.fac = "std.lv",              #ist default
+                                  ID.cat = "Wu",   #ist default
+                                  group = "education_group",
+                                  group.equal = c("thresholds")) 
+
+
+
+oblq_education_threshold.model <- as.character(oblq_education_threshold)
+
+
+#fitten
+
+oblq_education_threshold.fit <- cfa(oblq_education_threshold.model, 
+                                    data.obl,
+                                    group = "education_group",
+                                    ordered = TRUE)
+
+
+summary(oblq_education_threshold.fit, standardized = TRUE)
+
+
+#matrix fuellen
+
+
+oblq.model.results[7, ] <- round(data.matrix(fitmeasures(oblq_education_threshold.fit, 
+                                                    fit.measures = 
+                                                      c("chisq", "df",
+                                                        "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                            digits = 3)
+
+oblq.model.results
+
+
+#chi-square statistics
+
+lavTestLRT(oblq_education_config.fit, oblq_education_threshold.fit)
+
+
+
+
+#3. threshold + loadings
+
+oblq_education_loadings <- measEq.syntax(obl.model.cat,
+                                 data.obl,
+                                 ordered = TRUE,
+                                 parameterization = "delta",     #default: theta!
+                                 ID.fac = "std.lv",              #ist default
+                                 ID.cat = "Wu",   #ist default
+                                 group = "education_group",
+                                 group.equal = c("thresholds", "loadings")) 
+
+
+
+oblq_education_loadings.model <- as.character(oblq_education_loadings)
+
+
+#fitten
+
+oblq_education_loadings.fit <- cfa(oblq_education_loadings.model, 
+                           data.obl,
+                           group = "education_group",
+                           ordered = TRUE)
+
+summary(oblq_education_loadings.fit , standardized = TRUE, fit.measures = TRUE)
+
+
+#matrix fuellen
+
+
+oblq.model.results[8, ] <- round(data.matrix(fitmeasures(oblq_education_loadings.fit , 
+                                                    fit.measures = 
+                                                      c("chisq", "df",
+                                                        "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                            digits = 3)
+
+oblq.model.results
+
+
+#chi-square statistics
+
+lavTestLRT(oblq_education_threshold.fit , oblq_education_loadings.fit) 
+
+```
+
+
+### Age: 
+
+```{r OBLQ MG-CFA: age}
+
+#config 
+
+oblq_age_config <- measEq.syntax(obl.model.cat,
+                                  data.obl,
+                                  ordered = TRUE,
+                                  parameterization = "delta",     
+                                  ID.fac = "std.lv",             
+                                  ID.cat = "Wu",   
+                                  group = "age_group",
+                                  group.equal = "configural") 
+
+
+oblq_age_config.model <- as.character(oblq_age_config) #um cfa() zu uebergeben
+
+
+
+#fitten
+
+oblq_age_config.fit <- cfa(oblq_age_config.model, 
+                            data.obl,
+                            group = "age_group",
+                            ordered = TRUE)
+
+
+summary(oblq_age_config.fit, 
+        standardized = TRUE,
+        rsquare = TRUE)
+
+
+oblq.model.results[9, ] <- round(data.matrix(fitmeasures(oblq_age_config.fit, 
+                                                    fit.measures = 
+                                                      c("chisq", "df",
+                                                        "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                            digits = 3)
+
+
+##2. model mit threshold invariance ##
+
+oblq_age_threshold <- measEq.syntax(obl.model.cat,
+                                     data.obl,
+                                     ordered = TRUE,
+                                     parameterization = "delta",     
+                                     ID.fac = "std.lv",              
+                                     ID.cat = "Wu",   
+                                     group = "age_group",
+                                     group.equal = c("thresholds")) 
+
+
+
+oblq_age_threshold.model <- as.character(oblq_age_threshold)
+
+
+#fitten
+
+oblq_age_threshold.fit <- cfa(oblq_age_threshold.model, 
+                               data.obl,
+                               group = "age_group",
+                               ordered = TRUE)
+
+summary(oblq_age_threshold.fit, standardized = TRUE)
+
+
+#matrix fuellen
+
+
+oblq.model.results[10, ] <- round(data.matrix(fitmeasures(oblq_age_threshold.fit, 
+                                                    fit.measures = 
+                                                      c("chisq", "df",
+                                                        "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                            digits = 3)
+
+oblq.model.results
+
+
+#chi-square statistics
+
+lavTestLRT(oblq_age_config.fit, oblq_age_threshold.fit)
+
+
+
+
+#3. threshold + loadings
+
+oblq_age_loadings <- measEq.syntax(obl.model.cat,
+                                    data.obl,
+                                    ordered = TRUE,
+                                    parameterization = "delta",     #default: theta!
+                                    ID.fac = "std.lv",              #ist default
+                                    ID.cat = "Wu",   #ist default
+                                    group = "age_group",
+                                    group.equal = c("thresholds", "loadings")) 
+
+
+
+oblq_age_loadings.model <- as.character(oblq_age_loadings)
+
+
+
+
+#fitten
+
+oblq_age_loadings.fit <- cfa(oblq_age_loadings.model, 
+                              data.obl,
+                              group = "age_group",
+                              ordered = TRUE)
+
+summary(oblq_age_loadings.fit, standardized = TRUE, fit.measures = TRUE)
+
+
+#matrix fuellen
+
+
+oblq.model.results[11, ] <- round(data.matrix(fitmeasures(oblq_age_loadings.fit, 
+                                                    fit.measures = 
+                                                      c("chisq", "df",
+                                                        "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                            digits = 3)
+
+
+
+#chi-square statistics
+
+lavTestLRT(oblq_age_threshold.fit, oblq_age_loadings.fit)
+
+
+```
+
+### Sex 
+
+```{r OBLQ MG-CFA: sex}
+
+#1. config 
+
+oblq_sex_config <- measEq.syntax(obl.model.cat,
+                            data.obl,
+                            ordered = TRUE,
+                            parameterization = "delta",     #default: theta!
+                            ID.fac = "std.lv",              #ist default
+                            ID.cat = "Wu",   #ist default
+                            group = "sex",
+                            group.equal = "configural") 
+
+
+oblq_sex_config.model <- as.character(oblq_sex_config) #um cfa() zu uebergeben
+
+
+
+#fitten
+
+oblq_sex_config.fit <- cfa(oblq_sex_config.model , 
+                      data.obl,
+                      group = "sex",
+                      ordered = TRUE)
+
+
+summary(oblq_sex_config.fit, 
+        standardized = TRUE,
+        rsquare = TRUE)
+
+
+oblq.model.results[12, ] <- round(data.matrix(fitmeasures(oblq_sex_config.fit, 
+                                                    fit.measures = 
+                                                      c("chisq", "df",
+                                                        "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                            digits = 3)
+
+
+##2. model mit threshold invariance ##
+
+oblq_sex_threshold <- measEq.syntax(obl.model.cat,
+                               data.obl,
+                               ordered = TRUE,
+                               parameterization = "delta",     #default: theta!
+                               ID.fac = "std.lv",              #ist default
+                               ID.cat = "Wu",   #ist default
+                               group = "sex",
+                               group.equal = c("thresholds")) 
+
+
+
+oblq_sex_threshold.model <- as.character(oblq_sex_threshold)
+
+
+#fitten
+
+oblq_sex_threshold.fit <- cfa(oblq_sex_threshold.model, 
+                         data.obl,
+                         group = "sex",
+                         ordered = TRUE)
+
+summary(oblq_sex_threshold.fit, standardized = TRUE)
+
+
+#matrix fuellen
+
+
+oblq.model.results[13, ] <- round(data.matrix(fitmeasures(oblq_sex_threshold.fit, 
+                                                     fit.measures = 
+                                                       c("chisq", "df",
+                                                         "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                             digits = 3)
+
+oblq.model.results
+
+
+#chi-square statistics
+
+lavTestLRT(oblq_sex_config.fit, oblq_sex_threshold.fit)
+
+
+
+
+#3. threshold + loadings
+
+oblq_sex_loadings <- measEq.syntax(obl.model.cat,
+                              data.obl,
+                              ordered = TRUE,
+                              parameterization = "delta",     #default: theta!
+                              ID.fac = "std.lv",              #ist default
+                              ID.cat = "Wu",   #ist default
+                              group = "sex",
+                              group.equal = c("thresholds", "loadings")) 
+
+
+
+oblq_sex_loadings.model <- as.character(oblq_sex_loadings)
+
+
+
+#fitten
+
+oblq_sex_loadings.fit <- cfa(oblq_sex_loadings.model, 
+                        data.obl,
+                        group = "sex",
+                        ordered = TRUE)
+
+summary(oblq_sex_loadings.fit, standardized = TRUE, fit.measures = TRUE)
+
+
+#matrix fuellen
+
+
+oblq.model.results[14, ] <- round(data.matrix(fitmeasures(oblq_sex_loadings.fit, 
+                                                     fit.measures = 
+                                                       c("chisq", "df",
+                                                         "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                             digits = 3)
+
+
+
+
+oblq.model.results
+
+
+#chi-square statistics
+
+lavTestLRT(oblq_sex_threshold.fit, oblq_sex_loadings.fit)
+
+
+```
+
+### Within Wave: T1 vs. T2
+
+Das ist etwas anders, weil es longitudinal ist.
+
+
+Erst wird ein neues Baseline Model definiert. Jeweils ein Faktor pro Messung. Faktoren als Liste speichern, um measEq.syntax zu uebergeben.
+
+```{r OBLQ MG CFA longit Baseline Model}
+
+oblq_long_baseline <-
+  
+  
+  '
+#latent factors
+
+OBL_T1 =~ OBLQ01 + OBLQ02 + OBLQ03_k + OBLQ04_k + OBLQ05 + OBLQ06_k + OBLQ07_k + OBLQ08 + 
+        OBLQ09_k + OBLQ10 + OBLQ11 + OBLQ12_k + OBLQ13_k + OBLQ14_k + OBLQ15 + OBLQ16_k + 
+        OBLQ17 + OBLQ18 + OBLQ19_k + OBLQ20_k + OBLQ21_k + OBLQ22_k + OBLQ23 + OBLQ24_k + 
+        OBLQ25_k + OBLQ26_k + OBLQ27 + OBLQ28_k + OBLQ29_k + OBLQ30
+
+OBL_T2 =~ T2_OBLQ01 + T2_OBLQ02 + T2_OBLQ03_k + T2_OBLQ04_k + T2_OBLQ05 + T2_OBLQ06_k + T2_OBLQ07_k + 
+          T2_OBLQ08 + T2_OBLQ09_k + T2_OBLQ10 + T2_OBLQ11 + T2_OBLQ12_k + T2_OBLQ13_k + T2_OBLQ14_k + 
+          T2_OBLQ15 + T2_OBLQ16_k + T2_OBLQ17 + T2_OBLQ18 + T2_OBLQ19_k + T2_OBLQ20_k + T2_OBLQ21_k + 
+          T2_OBLQ22_k + T2_OBLQ23 + T2_OBLQ24_k + T2_OBLQ25_k + T2_OBLQ26_k + T2_OBLQ27 + 
+          T2_OBLQ28_k + T2_OBLQ29_k + T2_OBLQ30
+
+'
+
+longFacNames <- list(OBL = c("OBL_T1", "OBL_T2"))
+
+
+```
+
+
+Ab hier business as usual.
+
+```{r longit}
+
+oblq_long_config <- measEq.syntax(oblq_long_baseline,
+                               data = data.obl,
+                               parameterization = "delta",
+                               meanstructure = TRUE,
+                               ordered = TRUE,
+                               missing = "pairwise",
+                               ID.fac = "std.lv",
+                               ID.cat = "Wu",
+                               longFacNames = longFacNames) 
+
+
+
+#syntax ausschecken
+
+
+oblq_long_config.model <- as.character(oblq_long_config)
+
+cat(as.character(oblq_long_config.model))
+
+
+# fitten #
+
+
+oblq_long_config.fit <- cfa(oblq_long_config.model,
+                       data.obl,
+                       ordered = TRUE,
+                       estimator = "DWLS",
+                       missing = "pairwise")
+
+
+summary(oblq_long_config.fit, standardized = TRUE, fit.measures = TRUE)
+
+
+oblq.model.results[15, ] <- round(data.matrix(fitmeasures(oblq_long_config.fit, 
+                                                    fit.measures = 
+                                                      c("chisq", "df",
+                                                        "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                            digits = 3)
+
+## 2. threshold invariance model ## 
+
+oblq_long_threshold <- measEq.syntax(oblq_long_baseline,
+                                data = data.obl,
+                                parameterization = "delta",
+                                ordered = TRUE,
+                                missing = "pairwise",
+                                ID.fac = "std.lv",
+                                ID.cat = "Wu",
+                                longFacNames = longFacNames,
+                                ID.thr = c(1,2),
+                                long.equal = "thresholds") 
+
+
+oblq_long_threshold.model <- as.character(oblq_long_threshold)
+
+
+# fitten # 
+
+oblq_long_threshold.fit <- cfa(oblq_long_threshold.model, #ohne as.character: error object "flat" not found
+                        data.obl,
+                        ordered = TRUE,
+                        estimator = "DWLS",
+                        missing = "pairwise")
+
+
+summary(oblq_long_threshold.fit, standardized = TRUE, fit.measures = TRUE)
+
+
+oblq.model.results[16, ] <- round(data.matrix(fitmeasures(oblq_long_threshold.fit, 
+                                                     fit.measures = 
+                                                       c("chisq", "df",
+                                                         "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                             digits = 3)
+
+
+
+lavTestLRT(oblq_long_config.fit, oblq_long_threshold.fit)
+
+
+## 3. loading + threshold invariance model ##
+
+oblq_long_loading <- measEq.syntax(oblq_long_baseline,
+                                   data = data.obl,
+                                   parameterization = "delta",
+                                   ordered = TRUE,
+                                   missing = "pairwise",
+                                   group = NULL,
+                                   meanstructure = TRUE,
+                                   ID.fac = "std.lv",
+                                   ID.cat = "Wu",
+                                   longFacNames = longFacNames,
+                                   ID.thr = c(1,2),
+                                   long.equal = c("loadings", "thresholds"))
+
+oblq_long_loading.model <- as.character(oblq_long_loading)
+
+
+# fitten # 
+
+oblq_long_loading.fit <- cfa(oblq_long_loading.model, #ohne as.character: error object "flat" not found
+                          data.obl,
+                          ordered = TRUE,
+                          estimator = "DWLS",
+                          missing = "pairwise")
+
+
+summary(oblq_long_loading.fit, standardized = TRUE, fit.measures = TRUE)
+
+
+
+oblq.model.results[17, ] <- round(data.matrix(fitmeasures(oblq_long_loading.fit, 
+                                                     fit.measures = 
+                                                       c("chisq", "df",
+                                                         "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                             digits = 3)
+
+
+
+lavTestLRT(oblq_long_threshold.fit, oblq_long_loading.fit)
+
+
+```
+
+
+## BCTI 
+
+gleiches Zeug wie fuer OBLQ. Wird nicht weiter kommentiert, ausser Results sind anders.
+
+```{r BCTI Model Matrix}
+
+
+bcti.model.results <- matrix(NA, nrow = 17, ncol = 7)
+bcti.model.results
+
+#beschriften
+
+colnames(bcti.model.results) <- c("chisquare", "df",
+                                  "pvalue", "CLI", "TLI", "RMSEA", "SRMR")
+
+
+rownames(bcti.model.results) <- c("Baseline.MLR", "Baseline.DWLS",
+                                  "Cohort.config", "Cohort.T", "Cohort.T+L",
+                                  "Education.config", "Education.T", "Education.T+L",
+                                  "Age.config", "Age.T", "Age.T+L", 
+                                  "Sex.config", "Sex.T", "Sex.T+L",
+                                  "Long.config", "Long.T", "Long.T+L")
+
+
+
+```
+
+
+### Baseline + MLR vs. DWLS.
+
+
+```{r BCTI Baseline}
+
+
+bcti.baseline <-
+  
+  'BCTI =~ Conspiracy01 + Conspiracy02 + Conspiracy03 + Conspiracy04_k + Conspiracy05 + Conspiracy06_k + 
+          Conspiracy07_k  + Conspiracy08 + Conspiracy09 + Conspiracy10_k  + Conspiracy11 + Conspiracy12 + 
+          Conspiracy13 +  Conspiracy14 + Conspiracy15'
+
+
+#1) mit DWLS
+
+
+bcti.baseline.fit.DWLS <- cfa(bcti.baseline, ordered = TRUE, data = data.obl, estimator = "DWLS")
+
+
+summary(bcti.baseline.fit.DWLS, fit.measures = TRUE, standardized = TRUE)
+
+
+
+#2) mit MLR
+
+
+
+bcti.baseline.fit.MLR <- cfa(bcti.baseline, data = data.obl, estimator = "MLR")
+
+summary(bcti.baseline.fit.MLR, fit.measures = TRUE, standardized = TRUE)
+
+
+#mit MLR modell befuellen
+
+bcti.model.results[1, ] <- round(data.matrix(fitmeasures(bcti.baseline.fit.MLR, 
+                                                         fit.measures = 
+                                                           c("chisq", "df",
+                                                             "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                 digits = 3)
+
+
+#mit DWLS befuellen
+
+bcti.model.results[2, ] <- round(data.matrix(fitmeasures(bcti.baseline.fit.DWLS, 
+                                                         fit.measures = 
+                                                           c("chisq", "df",
+                                                             "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                 digits = 3)
+
+
+bcti.model.results ##weniger extrem als bei bcti, muss trotzdem mit DWLS geschaetzt werden!
+
+
+```
+
+
+```{r BCTI Baseline Model Syntax} 
+
+bcti.model.cat <- 
+  
+  'BCTI =~ Conspiracy01 + Conspiracy02 + Conspiracy03 + Conspiracy04_k + Conspiracy05 + Conspiracy06_k + 
+          Conspiracy07_k  + Conspiracy08 + Conspiracy09 + Conspiracy10_k  + Conspiracy11 + Conspiracy12 + 
+          Conspiracy13 +  Conspiracy14 + Conspiracy15'
+
+
+```
+
+
+### Kohorten: 2011 vs. 2021
+
+```{r BCTI year}
+
+bcti_cohort.config <- measEq.syntax(bcti.model.cat,
+                                    data.obl,
+                                    ordered = TRUE,
+                                    parameterization = "delta",    
+                                    meanstructure = TRUE,
+                                    ID.fac = "std.lv",              
+                                    ID.cat = "Wu",
+                                    group = "year",
+                                    group.equal = "configural") 
+
+
+bcti_cohort.config.model <- as.character(bcti_cohort.config) #um cfa() zu uebergeben
+
+
+#fitten
+
+bcti_cohort_config.fit <- cfa(bcti_cohort.config.model, 
+                              data.obl,
+                              group = "year",
+                              ordered = TRUE)
+
+
+summary(bcti_cohort_config.fit, 
+        standardized = TRUE,
+        rsquare = TRUE)
+
+
+bcti.model.results[3, ] <- round(data.matrix(fitmeasures(bcti_cohort_config.fit, 
+                                                         fit.measures = 
+                                                           c("chisq", "df",
+                                                             "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                 digits = 3)
+
+
+##2. model mit threshold invariance ##
+
+bcti_cohort.threshold <- measEq.syntax(bcti.model.cat,
+                                       data.obl,
+                                       ordered = TRUE,
+                                       meanstructure = TRUE,
+                                       parameterization = "delta",     #default: theta!
+                                       ID.fac = "std.lv",              #ist default
+                                       ID.cat = "Wu",   #ist default
+                                       group = "year",
+                                       group.equal = c("thresholds")) 
+
+
+
+bcti_cohort_threshold.model <- as.character(bcti_cohort.threshold)
+
+
+#fitten
+
+bcti_cohort_threshold.fit <- cfa(bcti_cohort_threshold.model, 
+                                 data.obl,
+                                 group = "year",
+                                 ordered = TRUE)
+
+summary(bcti_cohort_threshold.fit, standardized = TRUE)
+
+
+
+#matrix fuellen
+
+
+bcti.model.results[4, ] <- round(data.matrix(fitmeasures(bcti_cohort_threshold.fit, 
+                                                         fit.measures = 
+                                                           c("chisq", "df",
+                                                             "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                 digits = 3)
+
+
+#chi-square statistics
+
+lavTestLRT(bcti_cohort_config.fit, bcti_cohort_threshold.fit)
+
+
+
+
+#3. threshold + loadings
+
+bcti_cohort_loadings <- measEq.syntax(bcti.model.cat,
+                                      data.obl,
+                                      ordered = TRUE,
+                                      meanstructure = TRUE,
+                                      parameterization = "delta",     #default: theta!
+                                      ID.fac = "std.lv",              #ist default
+                                      ID.cat = "Wu",   #ist default
+                                      group = "year",
+                                      group.equal = c("thresholds", "loadings")) 
+
+
+
+bcti_cohort_loadings.model <- as.character(bcti_cohort_loadings)
+
+
+#fitten
+
+bcti_cohort_loadings.fit <- cfa(bcti_cohort_loadings.model, 
+                                data.obl,
+                                group = "year",
+                                ordered = TRUE)
+
+summary(bcti_cohort_loadings.fit, standardized = TRUE, fit.measures = TRUE)
+
+
+#matrix fuellen
+
+
+bcti.model.results[5, ] <- round(data.matrix(fitmeasures(bcti_cohort_loadings.fit, 
+                                                         fit.measures = 
+                                                           c("chisq", "df",
+                                                             "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                 digits = 3)
+
+bcti.model.results
+
+
+#chi-square statistics
+
+lavTestLRT(bcti_cohort_threshold.fit, bcti_cohort_loadings.fit) 
+
+```
+
+### Education: low vs. high 
+
+```{r BCTI Education}
+
+
+#baseline
+
+bcti_education_config <- measEq.syntax(bcti.model.cat,
+                                       data.obl,
+                                       ordered = TRUE,
+                                       parameterization = "delta",     #default: theta!
+                                       ID.fac = "std.lv",              #ist default
+                                       ID.cat = "Wu",   #ist default
+                                       group = "education_group",
+                                       group.equal = "configural") 
+
+
+bcti_education_config.model <- as.character(bcti_education_config) #um cfa() zu uebergeben
+
+
+
+#fitten
+
+bcti_education_config.fit <- cfa(bcti_education_config.model, 
+                                 data.obl,
+                                 group = "education_group",
+                                 ordered = TRUE)
+
+
+summary(bcti_education_config.fit, 
+        standardized = TRUE,
+        rsquare = TRUE)
+
+
+bcti.model.results[6, ] <- round(data.matrix(fitmeasures(bcti_education_config.fit, 
+                                                         fit.measures = 
+                                                           c("chisq", "df",
+                                                             "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                 digits = 3)
+
+
+##2. model mit threshold invariance ##
+
+bcti_education_threshold <- measEq.syntax(bcti.model.cat,
+                                          data.obl,
+                                          ordered = TRUE,
+                                          parameterization = "delta",     #default: theta!
+                                          ID.fac = "std.lv",              #ist default
+                                          ID.cat = "Wu",   #ist default
+                                          group = "education_group",
+                                          group.equal = c("thresholds")) 
+
+
+
+bcti_education_threshold.model <- as.character(bcti_education_threshold)
+
+
+#fitten
+
+bcti_education_threshold.fit <- cfa(bcti_education_threshold.model, 
+                                    data.obl,
+                                    group = "education_group",
+                                    ordered = TRUE)
+
+
+summary(bcti_education_threshold.fit, standardized = TRUE)
+
+
+#matrix fuellen
+
+
+bcti.model.results[7, ] <- round(data.matrix(fitmeasures(bcti_education_threshold.fit, 
+                                                         fit.measures = 
+                                                           c("chisq", "df",
+                                                             "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                 digits = 3)
+
+bcti.model.results
+
+
+#chi-square statistics
+
+lavTestLRT(bcti_education_config.fit, bcti_education_threshold.fit)
+
+
+
+
+#3. threshold + loadings
+
+bcti_education_loadings <- measEq.syntax(bcti.model.cat,
+                                         data.obl,
+                                         ordered = TRUE,
+                                         parameterization = "delta",     #default: theta!
+                                         ID.fac = "std.lv",              #ist default
+                                         ID.cat = "Wu",   #ist default
+                                         group = "education_group",
+                                         group.equal = c("thresholds", "loadings")) 
+
+
+
+bcti_education_loadings.model <- as.character(bcti_education_loadings)
+
+
+#fitten
+
+bcti_education_loadings.fit <- cfa(bcti_education_loadings.model, 
+                                   data.obl,
+                                   group = "education_group",
+                                   ordered = TRUE)
+
+summary(bcti_education_loadings.fit , standardized = TRUE, fit.measures = TRUE)
+
+
+#matrix fuellen
+
+
+bcti.model.results[8, ] <- round(data.matrix(fitmeasures(bcti_education_loadings.fit , 
+                                                         fit.measures = 
+                                                           c("chisq", "df",
+                                                             "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                 digits = 3)
+
+bcti.model.results
+
+
+#chi-square statistics
+
+lavTestLRT(bcti_education_threshold.fit , bcti_education_loadings.fit ) 
+
+```
+
+### Age
+
+```{r BCTI Age}
+
+#config 
+
+bcti_age_config <- measEq.syntax(bcti.model.cat,
+                                 data.obl,
+                                 ordered = TRUE,
+                                 parameterization = "delta",     
+                                 ID.fac = "std.lv",             
+                                 ID.cat = "Wu",   
+                                 group = "age_group",
+                                 group.equal = "configural") 
+
+
+bcti_age_config.model <- as.character(bcti_age_config) #um cfa() zu uebergeben
+
+
+
+#fitten
+
+bcti_age_config.fit <- cfa(bcti_age_config.model, 
+                           data.obl,
+                           group = "age_group",
+                           ordered = TRUE)
+
+
+summary(bcti_age_config.fit, 
+        standardized = TRUE,
+        rsquare = TRUE)
+
+
+bcti.model.results[9, ] <- round(data.matrix(fitmeasures(bcti_age_config.fit, 
+                                                         fit.measures = 
+                                                           c("chisq", "df",
+                                                             "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                 digits = 3)
+
+
+##2. model mit threshold invariance ##
+
+bcti_age_threshold <- measEq.syntax(bcti.model.cat,
+                                    data.obl,
+                                    ordered = TRUE,
+                                    parameterization = "delta",     
+                                    ID.fac = "std.lv",              
+                                    ID.cat = "Wu",   
+                                    group = "age_group",
+                                    group.equal = c("thresholds")) 
+
+
+
+bcti_age_threshold.model <- as.character(bcti_age_threshold)
+
+
+#fitten
+
+bcti_age_threshold.fit <- cfa(bcti_age_threshold.model, 
+                              data.obl,
+                              group = "age_group",
+                              ordered = TRUE)
+
+summary(bcti_age_threshold.fit, standardized = TRUE)
+
+
+#matrix fuellen
+
+
+bcti.model.results[10, ] <- round(data.matrix(fitmeasures(bcti_age_threshold.fit, 
+                                                          fit.measures = 
+                                                            c("chisq", "df",
+                                                              "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                  digits = 3)
+
+bcti.model.results
+
+
+#chi-square statistics
+
+lavTestLRT(bcti_age_config.fit, bcti_age_threshold.fit)
+
+
+
+
+#3. threshold + loadings
+
+bcti_age_loadings <- measEq.syntax(bcti.model.cat,
+                                   data.obl,
+                                   ordered = TRUE,
+                                   parameterization = "delta",     #default: theta!
+                                   ID.fac = "std.lv",              #ist default
+                                   ID.cat = "Wu",   #ist default
+                                   group = "age_group",
+                                   group.equal = c("thresholds", "loadings")) 
+
+
+
+bcti_age_loadings.model <- as.character(bcti_age_loadings)
+
+
+
+
+#fitten
+
+bcti_age_loadings.fit <- cfa(bcti_age_loadings.model, 
+                             data.obl,
+                             group = "age_group",
+                             ordered = TRUE)
+
+summary(bcti_age_loadings.fit, standardized = TRUE, fit.measures = TRUE)
+
+
+#matrix fuellen
+
+
+bcti.model.results[11, ] <- round(data.matrix(fitmeasures(bcti_age_loadings.fit, 
+                                                          fit.measures = 
+                                                            c("chisq", "df",
+                                                              "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                  digits = 3)
+
+
+
+#chi-square statistics
+
+lavTestLRT(bcti_age_threshold.fit, bcti_age_loadings.fit)
+
+```
+
+
+
+### Sex
+
+```{r BCTI sex}
+
+#1. config 
+
+bcti_sex_config <- measEq.syntax(bcti.model.cat,
+                                 data.obl,
+                                 ordered = TRUE,
+                                 parameterization = "delta",     #default: theta!
+                                 ID.fac = "std.lv",              #ist default
+                                 ID.cat = "Wu",   #ist default
+                                 group = "sex",
+                                 group.equal = "configural") 
+
+
+bcti_sex_config.model <- as.character(bcti_sex_config) #um cfa() zu uebergeben
+
+
+
+#fitten
+
+bcti_sex_config.fit <- cfa(bcti_sex_config.model , 
+                           data.obl,
+                           group = "sex",
+                           ordered = TRUE)
+
+
+summary(bcti_sex_config.fit, 
+        standardized = TRUE,
+        rsquare = TRUE)
+
+
+bcti.model.results[12, ] <- round(data.matrix(fitmeasures(bcti_sex_config.fit, 
+                                                          fit.measures = 
+                                                            c("chisq", "df",
+                                                              "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                  digits = 3)
+
+
+##2. model mit threshold invariance ##
+
+bcti_sex_threshold <- measEq.syntax(bcti.model.cat,
+                                    data.obl,
+                                    ordered = TRUE,
+                                    parameterization = "delta",     #default: theta!
+                                    ID.fac = "std.lv",              #ist default
+                                    ID.cat = "Wu",   #ist default
+                                    group = "sex",
+                                    group.equal = c("thresholds")) 
+
+
+
+bcti_sex_threshold.model <- as.character(bcti_sex_threshold )
+
+
+#fitten
+
+bcti_sex_threshold.fit <- cfa(bcti_sex_threshold.model, 
+                              data.obl,
+                              group = "sex",
+                              ordered = TRUE)
+
+summary(bcti_sex_threshold.fit, standardized = TRUE)
+
+
+#matrix fuellen
+
+
+bcti.model.results[13, ] <- round(data.matrix(fitmeasures(bcti_sex_threshold.fit, 
+                                                          fit.measures = 
+                                                            c("chisq", "df",
+                                                              "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                  digits = 3)
+
+bcti.model.results
+
+
+#chi-square statistics
+
+lavTestLRT(bcti_sex_config.fit, bcti_sex_threshold.fit)
+
+
+
+
+#3. threshold + loadings
+
+bcti_sex_loadings <- measEq.syntax(bcti.model.cat,
+                                   data.obl,
+                                   ordered = TRUE,
+                                   parameterization = "delta",     #default: theta!
+                                   ID.fac = "std.lv",              #ist default
+                                   ID.cat = "Wu",   #ist default
+                                   group = "sex",
+                                   group.equal = c("thresholds", "loadings")) 
+
+
+
+bcti_sex_loadings.model <- as.character(bcti_sex_loadings)
+
+
+
+#fitten
+
+bcti_sex_loadings.fit <- cfa(bcti_sex_loadings.model, 
+                             data.obl,
+                             group = "sex",
+                             ordered = TRUE)
+
+summary(bcti_sex_loadings.fit, standardized = TRUE, fit.measures = TRUE)
+
+
+#matrix fuellen
+
+
+bcti.model.results[14, ] <- round(data.matrix(fitmeasures(bcti_sex_loadings.fit, 
+                                                          fit.measures = 
+                                                            c("chisq", "df",
+                                                              "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                  digits = 3)
+
+
+
+
+bcti.model.results
+
+
+#chi-square statistics
+
+lavTestLRT(bcti_sex_threshold.fit, bcti_sex_loadings.fit)
+
+```
+
+
+### Within Wave: T1 vs. T2
+
+
+```{r BCTI longit Baseline Model}
+
+bcti_long_baseline <-
+  
+  
+  '
+#latent factors
+
+BCTI_T1 =~ Conspiracy01 + Conspiracy02 + Conspiracy03 + Conspiracy04_k + Conspiracy05 + Conspiracy06_k + 
+          Conspiracy07_k  + Conspiracy08 + Conspiracy09 + Conspiracy10_k  + Conspiracy11 + Conspiracy12 + 
+          Conspiracy13 +  Conspiracy14 + Conspiracy15
+
+BCTI_T2 =~ T2_Consp01 + T2_Consp02 + T2_Consp03 + T2_Consp04_k + T2_Consp05 + T2_Consp06_k + 
+         T2_Consp07_k  + T2_Consp08 + T2_Consp09 + T2_Consp10_k  + T2_Consp11 + T2_Consp12 + 
+          T2_Consp13 +  T2_Consp14 + T2_Consp15
+
+'
+
+
+longFacNames <- list(OBL = c("BCTI_T1", "BCTI_T2"))
+
+
+```
+
+```{r BCTI longit}
+
+bcti_long_config <- measEq.syntax(bcti_long_baseline,
+                                  data = data.obl,
+                                  parameterization = "delta",
+                                  meanstructure = TRUE,
+                                  ordered = TRUE,
+                                  missing = "pairwise",
+                                  ID.fac = "std.lv",
+                                  ID.cat = "Wu",
+                                  longFacNames = longFacNames) 
+
+
+#syntax ausschecken
+
+
+bcti_long_config.model <- as.character(bcti_long_config)
+
+
+
+# fitten #
+
+
+bcti_long_config.fit <- cfa(bcti_long_config.model,
+                            data.obl,
+                            ordered = TRUE,
+                            estimator = "DWLS",
+                            missing = "pairwise")
+
+
+summary(bcti_long_config.fit, standardized = TRUE, fit.measures = TRUE)
+
+
+bcti.model.results[15, ] <- round(data.matrix(fitmeasures(bcti_long_config.fit, 
+                                                          fit.measures = 
+                                                            c("chisq", "df",
+                                                              "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                  digits = 3)
+
+## 2. threshold invariance model ## 
+
+bcti_long_threshold <- measEq.syntax(bcti_long_baseline,
+                                     data = data.obl,
+                                     parameterization = "delta",
+                                     ordered = TRUE,
+                                     missing = "pairwise",
+                                     ID.fac = "std.lv",
+                                     ID.cat = "Wu",
+                                     longFacNames = longFacNames,
+                                     ID.thr = c(1,2),
+                                     long.equal = "thresholds") 
+
+
+bcti_long_threshold.model <- as.character(bcti_long_threshold)
+
+
+# fitten # 
+
+bcti_long_threshold.fit <- cfa(bcti_long_threshold.model, #ohne as.character: error object "flat" not found
+                               data.obl,
+                               ordered = TRUE,
+                               estimator = "DWLS",
+                               missing = "pairwise")
+
+
+summary(bcti_long_threshold.fit, standardized = TRUE, fit.measures = TRUE)
+
+
+bcti.model.results[16, ] <- round(data.matrix(fitmeasures(bcti_long_threshold.fit, 
+                                                          fit.measures = 
+                                                            c("chisq", "df",
+                                                              "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                  digits = 3)
+
+
+lavTestLRT(bcti_long_config.fit, bcti_long_threshold.fit)
+
+
+## 3. loading + threshold invariance model ##
+
+bcti_long_loading <- measEq.syntax(bcti_long_baseline,
+                                   data = data.obl,
+                                   parameterization = "delta",
+                                   ordered = TRUE,
+                                   missing = "pairwise",
+                                   group = NULL,
+                                   meanstructure = TRUE,
+                                   ID.fac = "std.lv",
+                                   ID.cat = "Wu",
+                                   longFacNames = longFacNames,
+                                   ID.thr = c(1,2),
+                                   long.equal = c("loadings", "thresholds"))
+
+bcti_long_loading.model <- as.character(bcti_long_loading)
+
+# fitten # 
+
+bcti_long_loading.fit <- cfa(bcti_long_loading.model, #ohne as.character: error object "flat" not found
+                             data.obl,
+                             ordered = TRUE,
+                             estimator = "DWLS",
+                             missing = "pairwise")
+
+
+summary(bcti_long_loading.fit, standardized = TRUE, fit.measures = TRUE)
+
+
+
+bcti.model.results[17, ] <- round(data.matrix(fitmeasures(bcti_long_loading.fit, 
+                                                          fit.measures = 
+                                                            c("chisq", "df",
+                                                              "pvalue", "CFI", "TLI", "RMSEA", "SRMR"))), 
+                                  digits = 3)
+
+
+lavTestLRT(bcti_long_threshold.fit, bcti_long_loading.fit)
+
+
+
+bcti.model.results
+
+
+
+```
+
+
+# RH2 + RH3: latent-mean decrease of OBLQ and BCTI 
+
+29.10.: Update nach Gespräch mit UST:
+
+- KEINE FS EXTRACTION MEHR!
+
+- versuchen, between wave change auch in CLPM (sonst: ANCOVA)
+
+
+
+## Between wave: ANCOVAs
+
+
+### OBLQ
+
+```{r OBLQ Model fitten + ANCOVA table}
+
+# model fitten und inspecten
+
+obl_cohort.fit <- lm(OBL_mean_T1 ~ age + sex + highest_education + year, data = data.obl)
+
+summary(obl_cohort.fit) #R^2 hier rausnehmen
+
+# ANCOVA tabelle machen:
+
+ancova.table_obl <- car::Anova(obl_cohort.fit, 
+                               type = 3)
+
+# partial eta squared anhaengen
+
+ancova.table_obl$pes <- c(ancova.table_obl $'Sum Sq'[-nrow(ancova.table_obl )], NA)/
+  (ancova.table_obl $'Sum Sq' + ancova.table_obl $'Sum Sq'[nrow(ancova.table_obl )])
+
+
+ancova.table_obl
+
+```
+
+Model diagnostics ansehen.
+
+
+```{r OBLQ Diagnostics}
+
+obl_cohort.fit.metrics <- augment(obl_cohort.fit) %>%
+  select(-.hat, -.sigma, -.fitted) 
+head(obl_cohort.fit.metrics, 3) 
+
+
+# normality 
+
+hist(obl_cohort.fit.metrics$.resid)
+
+shapiro_test(obl_cohort.fit.metrics$.resid) #wegen sample size zu vernachlaessigen?
+
+# varianzhomogenitaet
+
+obl_cohort.fit.metrics %>% levene_test(.resid ~ year)
+
+# outliers 
+
+obl_cohort.fit.metrics %>% 
+  filter(abs(.std.resid) > 3) %>%
+  as.data.frame() #theoretisch 3 outlier aber whatever
+
+
+```
+
+EMMeans und effect size holen.
+
+```{r OBLQ emmeans und effect sizes}
+
+ 
+
+emm_obl_cohort <- emmeans(obl_cohort.fit, specs = "year") # funktioniert doch wunderbar
+emm_obl_cohort
+
+#effect size
+
+eff_size(emm_obl_cohort, 
+         sigma = sigma(obl_cohort.fit), 
+         edf = df.residual(obl_cohort.fit))
+
+```
+
+
+Stuff fuer Visualiserung (fraglich ob ueberhaupt notwendig, aber ist halt da...)
+
+```{r OBLQ vis}
+
+# b) ueber anova_test fuer vis
+
+res.obl_cohort <- data.obl %>% anova_test(OBL_mean_T1 ~ sex + age + highest_education + year) 
+
+
+# EMMs
+
+pwc.obl.cohort <- data.obl %>% 
+  emmeans_test(
+    OBL_mean_T1 ~ year, covariate = c(highest_education, age)
+  )   #sex kann nicht inkludiert werden weil kategorial?
+
+
+get_emmeans(pwc.obl.cohort)
+
+
+# vis
+
+#pwc.obl.cohort <- pwc.obl.cohort %>% add_xy_position(x = "year", fun = "mean_se") 
+#ggline(get_emmeans(pwc.obl.cohort), x = "year", y = "emmean") +
+#  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) + 
+#  stat_pvalue_manual(pwc.obl.cohort, hide.ns = TRUE, tip.length = FALSE) +
+#  labs(
+#    subtitle = get_test_label(res.obl_cohort , detailed = TRUE),
+#    caption = get_pwc_label(pwc.obl.cohort)
+#  )
+
+
+```
+
+
+### BCTI
+
+Analog zu OBLQ.
+
+```{r BCTI Modell fitten + ANCOVA table}
+
+bcti_cohort.fit <- lm(BCTI_mean_T1 ~ age + sex + highest_education + year, data = data.obl)
+
+summary(bcti_cohort.fit) #R^2 hier rausnehmen
+
+# ANCOVA tabelle machen:
+
+ancova.table_bcti <- car::Anova(bcti_cohort.fit, 
+                                type = 3)
+
+# partial eta squared anhaengen
+
+ancova.table_bcti$pes <- c(ancova.table_bcti $'Sum Sq'[-nrow(ancova.table_bcti )], NA)/
+  (ancova.table_bcti $'Sum Sq' + ancova.table_bcti $'Sum Sq'[nrow(ancova.table_bcti )])
+
+ancova.table_bcti
+
+```
+
+```{r BCTI Diagnostics}
+
+# Inspect the bcti_cohort.fit diagnostic metrics
+
+bcti_cohort.fit.metrics <- augment(bcti_cohort.fit) %>%
+  select(-.hat, -.sigma, -.fitted) # Remove details
+head(bcti_cohort.fit.metrics, 3)# 
+
+
+# normality mit shapiro wilk ansehen
+
+hist(bcti_cohort.fit.metrics$.resid)
+
+shapiro_test(bcti_cohort.fit.metrics$.resid) #wegen sample size zu vernachlaessigen?
+
+# varianzhomogenitaet
+
+bcti_cohort.fit.metrics %>% levene_test(.resid ~ year)
+
+# outliers 
+
+bcti_cohort.fit.metrics %>% 
+  filter(abs(.std.resid) > 3) %>%
+  as.data.frame() #theoretisch 3 outlier aber whatever
+
+```
+
+```{r BCTI emmeans + effect sizes}
+
+# get emmeans 
+
+emm_bcti_cohort <- emmeans(bcti_cohort.fit, specs = "year")
+emm_bcti_cohort
+
+#effect size
+
+eff_size(emm_bcti_cohort, 
+         sigma = sigma(bcti_cohort.fit), 
+         edf = df.residual(bcti_cohort.fit))
+
+```
+
+```{r BCTI vis}
+
+# b) ueber anova_test fuer vis
+
+res.bcti_cohort <- data.obl %>% anova_test(BCTI_mean_T1 ~ sex + age + highest_education + year) 
+
+
+# EMMs
+
+pwc.bcti.cohort <- data.obl %>% 
+  emmeans_test(
+    BCTI_mean_T1 ~ year, covariate = c(highest_education, age)
+  )   #sex kann nicht inkludiert werden weil kategorial?
+
+
+get_emmeans(pwc.bcti.cohort)
+
+# vis
+
+#pwc.bcti.cohort <- pwc.bcti.cohort %>% add_xy_position(x = "year", fun = "mean_se")
+#ggline(get_emmeans(pwc.bcti.cohort), x = "year", y = "emmean") +
+#  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) + 
+#  stat_pvalue_manual(pwc.bcti.cohort, hide.ns = TRUE, tip.length = FALSE) +
+#  labs(
+#    subtitle = get_test_label(res.bcti_cohort , detailed = TRUE),
+#    caption = get_pwc_label(pwc.bcti.cohort)
+#  )
+
+```
+
+## Within wave: MLM
+
+Als erstes muessen die Daten loooong gemacht werden. Separat fuer OBLQ und BCTI.
+
+
+```{r long transform}
+
+##OBLQ
+
+obl.long <- data.obl %>% gather(key = "Time",
+                                value = "OBL_mean",
+                                OBL_mean_T1:OBL_mean_T2,
+                                factor_key = TRUE)
+  #rename factor levels
+
+levels(obl.long$Time) <- c(1, 2)
+
+
+#BCTI
+
+
+bcti.long <- data.obl %>% gather(key = "Time",
+                                value = "BCTI_mean",
+                                BCTI_mean_T1:BCTI_mean_T2,
+                                factor_key = TRUE)
+  #rename factor levels
+
+levels(bcti.long$Time) <- c(1, 2)
+
+```
+
+### OBLQ
+
+  #### 2011
+
+Modell fitten und summary inspecten. LL fuer reporting holen.
+
+```{r MLM OBLQ 11 fitten}
+
+obl.long_11 <- obl.long %>% filter(year == 1)
+
+#modell fitten
+
+obl_lme.main_11 <- lmer(OBL_mean  ~ highest_education + age + sex  + Time * media_T1  + (1 | ID),
+                   obl.long_11)
+
+summary(obl_lme.main_11)
+
+#also, get LL for reporting
+
+logLik(obl_lme.main_11)
+
+```
+
+OBLQ 2011: probe interaction Time * media_T1.
+
+```{r MLM OBLQ 11 interaction: plot}
+
+base_plot <- emmip(obl_lme.main_11, media_T1 ~ Time, cov.reduce = range, CIs = TRUE)
+
+base_plot +
+  scale_y_continuous(expand = c(0, 0), limits = range(data.obl$media_T1, na.rm = TRUE)) +
+  theme_minimal() 
+
+```
+
+17.03.:
+
+overall effect (2017 - 2025) momentan in Manuskript verwendet (Table 11).
+
+-> ist unsinnig wegen interaktion!
+
+```{r MLM OBLQ 11 interaction: emmeans und effect size}
+
+
+
+obl_lme.emm_11 <- emmeans(obl_lme.main_11, pairwise ~ Time | media_T1, cov.reduce = function(x) quantile(x, c(0.10, 0.5, 0.90)))
+
+#effect size: take df of contrast for edf and total error SD for sigma
+
+obl_lme.emm_11 #228 - 230
+
+eff_size(obl_lme.emm_11,
+         sigma = obl_lme.main_11@sigma,
+         edf = 229)
+
+
+## overall effect ohne berücksichtigung interaktion
+
+temp <- emmeans(obl_lme.main_11, pairwise ~ Time)
+
+temp # df = 229
+
+eff_size(temp,
+         sigma = obl_lme.main_11@sigma,
+         edf = 229)
+
+```
+
+
+Diagnostics nur visuell ueber resid_panel.
+
+```{r MLM OBLQ 11 Diagnostics}
+
+resid_panel(obl_lme.main_11, plots = c("yvp", "resid", "qq", "hist")) #heteroskedastisch?
+
+```
+
+#### 2021
+
+```{r OBLQ MLM 21 fitten}
+
+obl.long_21 <- obl.long %>% filter(year == 2)
+
+#modell fitten
+
+obl_lme.main_21 <- lmer(OBL_mean  ~ highest_education + age + sex  + Time * media_T1 + (1 | ID),
+                 obl.long_21)
+
+summary(obl_lme.main_21)
+
+#also, get LL for reporting
+
+logLik(obl_lme.main_21)
+
+```
+
+
+EMMeans und effect size -> hier etwas komplizierter als bei ANCOVA. Fuer Effektschaetzung df des Kontrasts + total error SD fuer die SD verwenden.
+
+```{r OBLQ MLM 21 emmeans + effect size}
+
+# get emmeans and effect size of contrast
+
+obl_lme.emm_21 <- emmeans(obl_lme.main_21, pairwise ~ Time)
+
+#effect size: take df of contrast for edf and total error SD for sigma
+
+obl_lme.emm_21 #237
+
+eff_size(obl_lme.emm_21,
+         sigma = obl_lme.main_21@sigma,
+         edf = 237)
+
+```
+
+
+Diagnostics nur visuell ueber resid_panel.
+
+```{r OBLQ MLM 21 Diagnostics}
+
+resid_panel(obl_lme.main_21, plots = c("yvp", "resid", "qq", "hist")) #heteroskedastisch?
+
+```
+
+
+### BCTI
+
+#### 2011
+
+
+```{r BCTI MLM 11 Modell fitten}
+
+bcti.long_11 <- bcti.long %>% filter(year == 1)
+
+bcti_lme.main_11 <- lmer(BCTI_mean ~ highest_education + age + sex  + Time * media_T1 + (1 | ID),
+                 bcti.long_11)
+
+summary(bcti_lme.main_11)
+
+#also, get LL for reporting
+
+logLik(bcti_lme.main_11)
+
+```
+
+
+```{r BCTI MLM 11 emmeans + effect size}
+
+# get emmeans
+
+bcti_lme.emm_11 <- emmeans(bcti_lme.main_11, pairwise ~ Time)
+
+
+#effect size: take df of contrast for edf and total error SD for sigma
+
+bcti_lme.emm_11 #228
+
+eff_size(bcti_lme.emm_11,
+         sigma = bcti_lme.main_11@sigma,
+         edf = 228)
+```
+
+```{r BCTI MLM 11 Diagnostics}
+
+resid_panel(bcti_lme.main_11, plots = c("yvp", "resid", "qq", "hist")) 
+
+```
+
+#### 2021
+
+
+
+```{r MLM BCTI 21 Modell fitten}
+
+bcti.long_21 <- bcti.long %>% filter(year == 2)
+
+bcti_lme.main_21 <- lmer(BCTI_mean ~ highest_education + age + sex  + Time * media_T1  + (1 | ID),
+                 bcti.long_21)
+
+summary(bcti_lme.main_21)
+
+#also, get LL for reporting
+
+logLik(bcti_lme.main_21)
+
+```
+
+
+BCTI 2021: probe interaction Time * media_T1
+
+```{r MLM BCTI 21 interaction: plot}
+
+base_plot <- emmip(bcti_lme.main_21, media_T1 ~ Time, cov.reduce = range, CIs = TRUE)
+
+base_plot +
+  scale_y_continuous(expand = c(0, 0), limits = range(data.obl$media_T1, na.rm = TRUE)) +
+  theme_minimal() 
+
+
+```
+
+17.03.:
+
+overall effect (2182 - 2188) momentan in Manuskript verwendet (Table 11).
+
+-> gleiches wie bei MLM OBLQ 11.
+
+```{r MLM BCTI 21 interaction: emmeans und effect size}
+
+bcti_lme.emm_21 <- emmeans(bcti_lme.main_21, pairwise ~ Time | media_T1, cov.reduce = function(x) quantile(x, c(0.10, 0.5, 0.90)))
+
+#effect size: take df of contrast for edf and total error SD for sigma
+
+bcti_lme.emm_21 #233
+
+eff_size(bcti_lme.emm_21,
+         sigma = bcti_lme.main_21@sigma,
+         edf = 233)
+
+
+## overall effect ohne berücksichtigung interaktion
+
+temp <- emmeans(bcti_lme.main_21, pairwise ~ Time)
+
+temp # df = 229
+
+eff_size(temp,
+         sigma = bcti_lme.main_21@sigma,
+         edf = 229)
+
+
+```
+
+```{r MLM BCTI 21 Diagnostics}
+
+resid_panel(bcti_lme.main_21, plots = c("yvp", "resid", "qq", "hist")) 
+
+```
+
+# RH4: CLPM of OBLQ and BCTI
+
+We will take this step-by-step:
+
+1) basic CLPM: OBLQ + BCTI at both measurement points
+2) make MG with year
+3) include predictors
+4) include covariates
+
+-> 3)+4): how to decide on relevant predictors? This is important as this shit is really big.
+
+
+The general work flow for individual models will be:
+
+  a) define model syntax
+  b) fit 
+  c) inspect results
+  d) visualize accordingly (with relevant results in mind)
+  
+
+ANMERKUNG: Tutorial fuer customization von grafiken: 
+
+https://cran.r-project.org/web/packages/tidySEM/vignettes/Plotting_graphs.html)
+
+
+
+## 1. Basic CLPM
+
+```{r Basic CLPM}
+
+CLPM_1.mod <- 
+"
+
+#gerichtete Pfade
+
+OBL_mean_T2 ~ OBL_mean_T1 + BCTI_mean_T1
+BCTI_mean_T2 ~  OBL_mean_T1 + BCTI_mean_T1
+
+"
+
+CLPM_1.fit <- sem(CLPM_1.mod, 
+                  data.obl,
+                  estimator = "MLR",
+                  missing = "ML",
+                  meanstructure = TRUE)
+
+summary(CLPM_1.fit, standardized = TRUE)
+
+table_results(CLPM_1.fit)
+
+
+#vis 
+
+
+graph_sem(CLPM_1.fit,
+          layout =
+            get_layout("OBL_mean_T1", "OBL_mean_T2",
+                       "BCTI_mean_T1", "BCTI_mean_T2", rows = 2),
+            edges = get_edges(CLPM_1.fit, label = "est_sig_std"))
+
+```
+
+## 2. Basic CLPM + MG und media 
+
+```{r}
+
+CLPM_2.mod <- 
+"
+
+#gerichtete Pfade
+
+OBL_mean_T1 ~ media_T1
+
+BCTI_mean_T1 ~ media_T1
+
+OBL_mean_T2 ~ OBL_mean_T1 + BCTI_mean_T1 + media_T1
+BCTI_mean_T2 ~  OBL_mean_T1 + BCTI_mean_T1 + media_T1 
+
+#korrelationen
+
+OBL_mean_T1 ~~ BCTI_mean_T1
+
+"
+
+CLPM_2.fit <- sem(CLPM_2.mod, 
+                     data.obl,
+                     estimator = "MLR",
+                     missing = "ML",
+                     meanstructure = TRUE, 
+                     group = "year", fixed.x = FALSE)
+
+summary(CLPM_2.fit, standardized = TRUE, 
+        fit.measures = TRUE, rsquare = TRUE)
+
+# visualize 
+
+  # make layout
+
+CLPM_2.layout <- 
+  get_layout("", "media_T1", "",
+             "OBL_mean_T1", "", "OBL_mean_T2",
+             "", "", "",
+             "BCTI_mean_T1", "", "BCTI_mean_T2",
+             rows = 4)
+
+  #labels for nodes
+
+graph_sem(CLPM_2.fit,
+  layout = CLPM_2.layout,
+  edges = get_edges(CLPM_2.fit, label = "est_sig_std") %>%
+    filter(op == "~"),
+  get_nodes(CLPM_2.fit))
+
+```
+
+## 3. MG-CLPM with predictors
+
+```{r MG-CLPM with predictors}
+
+# 2. mit AA, SDP (erstmal nur gesamtscore), HR_CL, PCS, RWA und media exposure als 
+#praediktoren fuer jeweiligen Messzeitpunkt; dazu: big 5
+
+CLPM_3.mod <- "
+
+## gerichtete Pfade
+
+# praediktoren fuer T1
+
+OBL_mean_T1 ~ media_T1 + SupDem_mean_T1 + Authority_mean_T1 + 
+PolCyn_mean_T1 + RWA_mean_T1 + HRCL_mean_T1 + neurot_mean_T1 + 
+extraversion_mean_T1 + agreeableness_mean_T1 + openness_mean_T1 + consc_mean_T1
+
+BCTI_mean_T1 ~ media_T1 + SupDem_mean_T1 + Authority_mean_T1 + 
+PolCyn_mean_T1 + RWA_mean_T1 + HRCL_mean_T1 + neurot_mean_T1 + 
+extraversion_mean_T1 + agreeableness_mean_T1 + openness_mean_T1 + consc_mean_T1
+
+
+# T2
+
+OBL_mean_T2 ~  OBL_mean_T1 + BCTI_mean_T1 + media_T2 + SupDem_mean_T2 + Authority_mean_T2 + 
+PolCyn_mean_T2 + RWA_mean_T2 + HRCL_mean_T2 + neurot_mean_T2 + 
+extraversion_mean_T2 + agreeableness_mean_T2 + openness_mean_T2 + consc_mean_T2
+
+BCTI_mean_T2 ~ OBL_mean_T1 + BCTI_mean_T1 + media_T2 + SupDem_mean_T2 + Authority_mean_T2 + 
+PolCyn_mean_T2 + RWA_mean_T2 + HRCL_mean_T2 + neurot_mean_T2 + 
+extraversion_mean_T2 + agreeableness_mean_T2 + openness_mean_T2 + consc_mean_T2
+
+
+# Korrelationen 
+
+OBL_mean_T1 ~~ BCTI_mean_T1
+"
+
+
+CLPM_3.fit <- sem(CLPM_3.mod, 
+                  data.obl,
+                  estimator = "MLR",
+                  meanstructure = TRUE,
+                  group = "year")
+
+summary(CLPM_3.fit, standardized = TRUE,
+        fit.measures = TRUE, 
+        rsquare = TRUE)
+
+table_results(CLPM_3.fit)
+
+
+#vis dat shit 
+
+  # make layout 
+
+
+CLPM_3.layout <- get_layout("Authority_mean_T1", "", "", "Authority_mean_T2",
+           "SupDem_mean_T1", "", "", "SupDem_mean_T2",
+           "HRCL_mean_T1", "", "", "HRCL_mean_T2",
+           "PolCyn_mean_T1", "", "", "PolCyn_mean_T2",
+           "RWA_mean_T1", "OBL_mean_T1", "OBL_mean_T2", "RWA_mean_T2",
+           "media_T1", "BCTI_mean_T1", "BCTI_mean_T2", "media_T2",
+           "openness_mean_T1", "", "", "openness_mean_T2",
+           "extraversion_mean_T1", "", "", "extraversion_mean_T2",
+           "neurot_mean_T1", "", "", "neurot_mean_T2",
+           "agreeableness_mean_T1", "", "", "agreeableness_mean_T2",
+           "consc_mean_T1", "", "", "consc_mean_T2",
+           rows = 11)
+
+  # make edges: only regressions
+
+edg_3 <- get_edges(CLPM_3.fit, 
+                   label = "est_sig_std") %>%
+  filter(op == "~")
+
+  # make nodes: smaller?
+
+nod_3 <- get_nodes(CLPM_3.fit) %>%
+  mutate(size = 1)
+
+
+  # plot
+  
+graph_sem(CLPM_3.fit, 
+          layout = CLPM_3.layout,
+          nodes = nod_3,
+          edges = edg_3,
+          angle = 180) #grad keine ahnung wie man das besser formatiert
+
+
+
+```
+
+
+
+## 4. MG-CLPM mit predictors und SozDem covariates
+
+```{r MG-CLPM: Pred+Cov}
+
+# so wie ich es verstehe, sagen die einfach OBLQ/BCTI zu T1 UND T2 vorher
+
+CLPM_4.mod <- "
+
+## gerichtete Pfade
+
+# praediktoren fuer T1
+
+OBL_mean_T1 ~ media_T1 + SupDem_mean_T1 + Authority_mean_T1 + sex +
+age + highest_education +
+PolCyn_mean_T1 + RWA_mean_T1 + HRCL_mean_T1 + neurot_mean_T1 + 
+extraversion_mean_T1 + agreeableness_mean_T1 + openness_mean_T1 + consc_mean_T1 
+
+BCTI_mean_T1 ~ media_T1 + SupDem_mean_T1 + Authority_mean_T1 + sex +
+age + highest_education +
+PolCyn_mean_T1 + RWA_mean_T1 + HRCL_mean_T1 + neurot_mean_T1 + 
+extraversion_mean_T1 + agreeableness_mean_T1 + openness_mean_T1 + consc_mean_T1
+
+
+# T2
+
+OBL_mean_T2 ~  OBL_mean_T1 + BCTI_mean_T1 + media_T1 + sex + age + highest_education
++ SupDem_mean_T2 + Authority_mean_T2 + 
++ PolCyn_mean_T2 + RWA_mean_T2 + HRCL_mean_T2 + neurot_mean_T2 + 
++ extraversion_mean_T2 + agreeableness_mean_T2 + openness_mean_T2 + consc_mean_T2 
+
+BCTI_mean_T2 ~ OBL_mean_T1 + BCTI_mean_T1 + media_T1 + sex + age + highest_education
++ SupDem_mean_T2 + Authority_mean_T2 + 
++ PolCyn_mean_T2 + RWA_mean_T2 + HRCL_mean_T2 + neurot_mean_T2 + 
++ extraversion_mean_T2 + agreeableness_mean_T2 + openness_mean_T2 + consc_mean_T2 
+
+
+# Korrelationen 
+
+OBL_mean_T1 ~~ BCTI_mean_T1
+
+
+"
+
+
+CLPM_4.fit <- sem(CLPM_4.mod, 
+                  data.obl,
+                  estimator = "MLR",
+                  missing = "ML",
+                  fixed.x = FALSE,
+                  meanstructure = TRUE,
+                  group = "year")
+
+CLPM_4.results <- summary(CLPM_4.fit, fit.measures = TRUE, 
+        standardized = TRUE,
+        rsquare = TRUE)
+
+table_results(CLPM_4.fit)
+
+#mal ueberlegen, wie man die results von sowas riesigem darstellen kann
+
+## mal nur die regressions und relevante spalten 
+
+results_4.temp <- CLPM_4.results$PE
+
+CLPM_4.regResults <- results_4.temp %>% filter(op == "~") %>% select(rhs, lhs, std.all,  group, z, pvalue)
+
+# nach groesse der est_std sortieren 
+
+CLPM_4.regResults[order(abs(CLPM_4.regResults$std.all), decreasing = TRUE), ]
+
+#vis dat shit 
+
+# layout 
+
+
+CLPM_4.layout <- 
+  get_layout("Authority_mean_T1", "age", "sex", "Authority_mean_T2",
+                            "SupDem_mean_T1", "", "", "SupDem_mean_T2",
+                            "HRCL_mean_T1", "", "", "HRCL_mean_T2",
+                            "PolCyn_mean_T1", "", "", "PolCyn_mean_T2",
+                            "RWA_mean_T1", "OBL_mean_T1", "OBL_mean_T2","RWA_mean_T2",
+                            "media_T1", "BCTI_mean_T1", "BCTI_mean_T2", "media_T2",
+                            "openness_mean_T1", "", "", "openness_mean_T2",
+                            "extraversion_mean_T1", "", "", "extraversion_mean_T2",
+                            "neurot_mean_T1", "", "", "neurot_mean_T2",
+                            "agreeableness_mean_T1", "", "", "agreeableness_mean_T2",
+                            "consc_mean_T1", "highest_education", "", "consc_mean_T2",
+                            rows = 11)
+
+
+# edges: nur regressions + standardized
+
+edg_4 <- get_edges(CLPM_4.fit, labels = "est_sig_std") %>%
+  filter(op == "~")
+
+
+graph_sem(CLPM_4.fit, 
+          layout = CLPM_4.layout,
+          edges = edg_4,
+          angle = 200)
+
+
+```
+
+## 5. MG-CLPM: mit signifikanten praediktoren/covariates aus 4.
+
+```{r MG-CLPM: relevant predictors}
+
+# welche praediktoren aus 4. irgendwo signifikant (mal gegen p < .01)
+
+sig.predictors <- CLPM_4.regResults %>%
+                  filter(pvalue < .05) %>%
+                  distinct(rhs)
+
+sig.predictors #zusaetzlich age und sex als kontrolle!
+
+# model
+
+
+CLPM_5.mod <- "
+
+## gerichtete Pfade
+
+# praediktoren fuer T1
+
+OBL_mean_T1 ~ media_T1 + SupDem_mean_T1 + Authority_mean_T1 + sex +
+age + highest_education +
+PolCyn_mean_T1 + RWA_mean_T1 + HRCL_mean_T1 + openness_mean_T1 + consc_mean_T1 
+
+BCTI_mean_T1 ~ media_T1 + SupDem_mean_T1 + Authority_mean_T1 + sex +
+age + highest_education +
+PolCyn_mean_T1 + RWA_mean_T1 + HRCL_mean_T1 + openness_mean_T1 + consc_mean_T1 
+
+
+# T2
+
+OBL_mean_T2 ~  OBL_mean_T1 + BCTI_mean_T1 + media_T1 + SupDem_mean_T1 + Authority_mean_T1 + sex +
+age + highest_education +
+PolCyn_mean_T1 + RWA_mean_T1 + HRCL_mean_T1 + openness_mean_T1 + consc_mean_T1 
+
+BCTI_mean_T2 ~ OBL_mean_T1 + BCTI_mean_T1 + media_T1 + SupDem_mean_T1 + Authority_mean_T1 + sex +
+age + highest_education +
+PolCyn_mean_T1 + RWA_mean_T1 + HRCL_mean_T1 + openness_mean_T1 + consc_mean_T1 
+
+
+# Korrelationen 
+
+OBL_mean_T1 ~~ BCTI_mean_T1
+
+
+"
+
+# fitten
+
+CLPM_5.fit <- sem(CLPM_5.mod, 
+                  data.obl,
+                  estimator = "MLR",
+                  missing = "ML",
+                  meanstructure = TRUE,
+                  group = "year")
+
+
+summary(CLPM_5.fit, fit.measures = TRUE, 
+        standardized = TRUE,
+        rsquare = TRUE)
+
+CLPM_5.results <- summary(CLPM_5.fit, fit.measures = TRUE, 
+        standardized = TRUE,
+        rsquare = TRUE)
+
+
+
+# results inspecten
+
+temp <- CLPM_5.results$PE
+
+CLPM_5.regResults <- temp %>% filter(op == "~") %>% select(rhs, lhs, std.all, z, pvalue)
+
+# nach groesse der est_std sortieren 
+
+CLPM_5.regResults[order(abs(CLPM_5.regResults$std.all), decreasing = TRUE), ]
+
+
+#...
+
+
+# vis
+
+# layout; anm: age, sex nicht visualisiert
+
+CLPM_5.layout <- get_layout("PolCyn_mean_T1", "",  "highest_education", "", "", "media_T1",
+                            "RWA_mean_T1", "", "OBL_mean_T1",   "OBL_mean_T2", "", "",
+                            "HRCL_mean_T1", "", "BCTI_mean_T1",  "BCTI_mean_T2", "", "",
+                            "Authority_mean_T1", "",  "", "", "", "",
+                            "", "",  "consc_mean_T1", "openness_mean_T1", "", "",
+                            rows = 5)
+
+# edges: 1) signifikante 2) standardisierte 3) regressionen; 
+#zusaetzlich: negative in rot
+
+edg_5 <- get_edges(CLPM_5.fit, label = "est_sig_std") %>%
+  filter(op == "~") %>%
+  filter(pval_std < .05) %>%
+  mutate(color = "black",
+         color = replace(color, est_sig_std < 0, "red"))
+
+
+
+
+# plot dis sheiss
+
+graph_sem(CLPM_5.fit, layout = CLPM_5.layout, 
+          edges = edg_5,
+          nodes = get_nodes(CLPM_5.fit, label = name))
+
+
+
+
+```
+
+Nur OBLQ und BCTI T1 vorhersagen (ausser media)
+
+```{r MG-CLPM mit relevanten Praediktoren: nur T1 vorhersagen}
+
+CLPM_6.mod <- "
+
+## gerichtete Pfade
+
+# praediktoren fuer T1
+
+OBL_mean_T1 ~ media_T1 + SupDem_mean_T1 + Authority_mean_T1 + sex +
+age + highest_education +
+PolCyn_mean_T1 + RWA_mean_T1 + HRCL_mean_T1 + openness_mean_T1 + consc_mean_T1 
+
+BCTI_mean_T1 ~ media_T1 + SupDem_mean_T1 + Authority_mean_T1 + sex +
+age + highest_education +
+PolCyn_mean_T1 + RWA_mean_T1 + HRCL_mean_T1 + openness_mean_T1 + consc_mean_T1 
+
+
+# T2
+
+OBL_mean_T2 ~  OBL_mean_T1 + BCTI_mean_T1 + media_T1 
+
+BCTI_mean_T2 ~ OBL_mean_T1 + BCTI_mean_T1 + media_T1 
+
+
+# Korrelationen 
+
+OBL_mean_T1 ~~ BCTI_mean_T1
+
+"
+
+# fitten
+
+CLPM_6.fit <- sem(CLPM_6.mod, 
+                  data.obl,
+                  estimator = "MLR",
+                  missing = "ML",
+                  meanstructure = TRUE,
+                  group = "year")
+
+
+summary(CLPM_6.fit, fit.measures = TRUE, 
+        standardized = TRUE,
+        rsquare = TRUE)
+
+CLPM_6.results <- summary(CLPM_6.fit, fit.measures = TRUE, 
+        standardized = TRUE,
+        rsquare = TRUE)
+
+
+
+# results inspecten
+
+temp <- CLPM_6.results$PE
+
+CLPM_6.regResults <- temp %>% filter(op == "~") %>% select(rhs, lhs, std.all, z, pvalue)
+
+# nach groesse der est_std sortieren 
+
+CLPM_6.regResults[order(abs(CLPM_6.regResults$std.all), decreasing = TRUE), ]
+
+
+#...
+
+
+# vis
+
+# layout; anm: age, sex nicht visualisiert
+
+CLPM_6.layout <- get_layout("", "SupDem_mean_T1",  "", "highest_education", "", "media_T1",
+                            "", "",  "", "", "", "",
+                            "PolCyn_mean_T1", "",  "", "", "", "",
+                            "", "",  "", "", "", "",
+                            "", "", "OBL_mean_T1",   "", "", "OBL_mean_T2",
+                            "", "",  "", "", "", "",
+                            "", "", "",   "", "", "",
+                            "RWA_mean_T1", "",  "", "", "", "",
+                            "", "", "BCTI_mean_T1",  "", "", "BCTI_mean_T2",
+                            "", "",  "", "", "", "",
+                            "HRCL_mean_T1", "", "",  "", "", "",
+                            "", "",  "", "", "", "",
+                            "Authority_mean_T1", "",  "", "", "", "",
+                            "", "",  "", "consc_mean_T1", "openness_mean_T1", "",
+                            rows = 14)
+
+# edges: 1) signifikante 2) standardisierte 3) regressionen; 
+#zusaetzlich: negative in rot
+
+edg_6 <- get_edges(CLPM_6.fit, label = "est_sig_std") %>%
+  filter(op == "~") %>%
+  filter(pval_std < .05) %>%
+  mutate(color = "black",
+         color = replace(color, est_sig_std < 0, "red"))
+
+
+# nodes (für labels)
+
+clpm.nodes <-  get_nodes(CLPM_6.fit, label = str_split(name, "\\_", 
+                                      simplify = TRUE)[, 1])
+
+#rename labels: include intercepts for OBLQ + BCTI T2!
+
+clpm_nodes.labels <- c("age", "Authority", "BCTI_mean_T1", "BCTI_mean_T2", "Conscient", "Education", "HRCL", "Media", "OBL_mean_T1", "OBL_mean_T2", "Openness", "PolCyn", "RWA", "sex", "SupDem",
+                       "age", "Authority", "BCTI_mean_T1", "BCTI_mean_T2", "Conscient", "Education", "HRCL", "Media", "OBL_mean_T1", "OBL_mean_T2", "Openness", "PolCyn", "RWA", "sex", "SupDem")  
+
+clpm.nodes$label <- clpm_nodes.labels
+
+
+
+# plot 
+
+graph_sem(CLPM_6.fit, layout = CLPM_6.layout, 
+          edges = edg_6,
+          nodes = get_nodes(CLPM_6.fit, label = str_split(name, "\\_", 
+                                                          simplify = TRUE)[, 1]))
+
+
+```
+
+
+
+# RH5: serial Mediation of OBLQ
+
+1) Model (laut PreReg)
+
+Predictors 1: Sex, age, big 5
+
+Mediators 1: Auth, PolCyn, SupDem, HRCL 
+
+Mediators 2: BCTI
+
+Predictors 2 (nur auf Outcome): Media (zu T1 UND T2?)
+
+
+2) seperate analysen fuer 2011 vs. 2021 UND T1 vs. T2 
+
+bzgl. 2) wie sinnvoll ist das bei der Modellgroesse?
+
+
+## 1. Testmodell: gesamter Datensatz
+
+Problem war: Korrelationen zwischen M1 vergessen. Jetzt ist immer noch nicht gut aber zumindest im Reich des 
+plausiblen4
+
+
+```{r}
+
+med1.mod <- 
+
+"
+    
+#1. P1 -> M1:
+  
+Authority_mean_T1 ~ a11 * sex + a12 * age +  a13 * neurot_mean_T1 + a14 * extraversion_mean_T1 + a15 * agreeableness_mean_T1 +  a16* consc_mean_T1 + a17 * openness_mean_T1 + a18 * highest_education
+  
+ PolCyn_mean_T1 ~ a21 * sex + a22 * age + a23 * neurot_mean_T1 + a24 * extraversion_mean_T1 + 
+ a25 * agreeableness_mean_T1 + a26 * consc_mean_T1 + a27 * openness_mean_T1 + a28 * highest_education
+  
+ SupDem_mean_T1 ~ a31 * sex + a32 * age + a33 * neurot_mean_T1 + a34 * extraversion_mean_T1 + 
+ a35 * agreeableness_mean_T1 + a36 * consc_mean_T1 + a37 *  openness_mean_T1 + a38 * highest_education
+  
+ HRCL_mean_T1 ~ a41 * sex + a42 * age + a43 * neurot_mean_T1 + a44 * extraversion_mean_T1 + a45 * agreeableness_mean_T1 +  a46* consc_mean_T1 + a47 *  openness_mean_T1 + a48 * highest_education
+
+ RWA_mean_T1 ~ a51 * sex + a52 * age + a53 * neurot_mean_T1 + a54 * extraversion_mean_T1 + a55 * agreeableness_mean_T1 +  a56* consc_mean_T1 + a57 *  openness_mean_T1 + a58 * highest_education
+  
+#2. M1 -> M2 
+  
+  BCTI_mean_T1 ~ b1 * Authority_mean_T1 + b2 * PolCyn_mean_T1 + b3 * SupDem_mean_T1 + 
+  b4 * HRCL_mean_T1 + b5 * RWA_mean_T1
+  
+  
+#3. M2 + P2 -> Outcome:
+
+
+  OBL_mean_T1 ~ c1 * BCTI_mean_T1 + d1 * media_T1
+  
+  
+# Korrelationen zwischen M1
+
+Authority_mean_T1 ~~ PolCyn_mean_T1
+Authority_mean_T1 ~~ SupDem_mean_T1
+Authority_mean_T1 ~~ HRCL_mean_T1
+Authority_mean_T1 ~~ RWA_mean_T1
+
+PolCyn_mean_T1 ~~ SupDem_mean_T1
+PolCyn_mean_T1 ~~ HRCL_mean_T1
+PolCyn_mean_T1 ~~ RWA_mean_T1
+
+SupDem_mean_T1 ~~ HRCL_mean_T1
+SupDem_mean_T1 ~~ RWA_mean_T1
+
+HRCL_mean_T1 ~~ RWA_mean_T1
+
+# indirect effects
+
+## involving Authority
+
+sex_auth := a11 * b1 * c1
+age_auth := a12 * b1 * c1
+neuro_auth := a13 * b1 * c1
+ex_auth := a14 * b1 * c1
+agree_auth := a15 * b1 * c1
+con_auth := a16 * b1 * c1
+open_auth := a17 * b1 * c1
+edu_auth := a18 * b1 * c1
+
+
+
+## involving PolCyn
+
+sex_pol := a21 * b2 * c1
+age_pol := a22 * b2 * c1
+neuro_pol := a23 * b2 * c1
+ex_pol := a24 * b2 * c1
+agree_pol := a25 * b2 * c1
+con_pol := a26 * b2 * c1
+open_pol := a27 * b2 * c1
+edu_pol := a28 * b2 * c1
+
+
+## involving SupDem
+
+sex_SupD := a31 * b3 * c1
+age_SupD := a32 * b3 * c1
+neuro_SupD := a33 * b3 * c1
+ex_SupD := a34 * b3 * c1
+agree_SupD := a35 * b3 * c1
+con_SupD := a36 * b3 * c1
+open_SupD := a37 * b3 * c1
+
+## involving HRCL
+
+sex_HRCL := a41 * b4 * c1
+age_HRCL := a42 * b4 * c1
+neuro_HRCL := a43 * b4 * c1
+ex_HRCL := a44 * b4 
+agree_HRCL := a45 * b4 
+con_HRCL := a46 * b4 * c1
+open_HRCL := a47 * b4 * c1
+
+##involving RWA
+
+sex_RWA := a51 * b5 * c1
+age_RWA := a52 * b5 * c1
+neuro_RWA := a53 * b5 * c1
+ex_RWA := a54 * b5 * c1
+agree_RWA := a55 * b5 * c1
+con_RWA := a56 * b5 * c1
+open_RWA := a57 * b5 * c1
+
+
+" 
+
+
+# fitten
+
+med1.fit <- sem(med1.mod, 
+                  data.obl,
+                estimator = "MLR")
+
+
+med1.results <- summary(med1.fit, fit.measures = TRUE, 
+               standardized = TRUE,
+               rsquare = TRUE) 
+
+
+# filter for indirect effects and sort by pvalue
+
+ med1.ind <- med1.results$PE %>%
+   filter(grepl("_", label)) %>%
+   select(label, std.all, z, pvalue) %>%
+   arrange(pvalue)
+
+med1.ind
+
+
+# mods anschauen
+
+
+modificationindices(med1.fit, sort = TRUE)
+
+
+
+# vis 
+
+  # layout
+
+med1.layout <- get_layout("sex", "", "", "",
+                          "age", "Authority_mean_T1", "", "",
+                          "extraversion_mean_T1", "PolCyn_mean_T1", "", "",
+                          "consc_mean_T1", "SupDem_mean_T1", "BCTI_mean_T1", "OBL_mean_T1",
+                          "openness_mean_T1", "HRCL_mean_T1", "", "",
+                          "neurot_mean_T1", "RWA_mean_T1", "", "",
+                          "highest_education", "", "", "",
+                          "agreeableness_mean_T1", "", "", "media_T1",
+                          rows = 8)
+
+
+  # edges
+
+edg_med1 <- edg_6 <- get_edges(med1.fit, label = NULL) %>%
+  filter(op == "~") 
+
+
+ # nodes names
+
+med.nodes <-  get_nodes(med1.fit, label = str_split(name, "\\_", 
+                                      simplify = TRUE)[, 1])
+
+#rename labels
+
+nodes.labels <- c("Authority", "PolCyn",    "SupDem",    "HRCL", "RWA",  "BCTI", "OBL",  
+"sex",   "age",   "neuroticism",    "extraversion",  "agreeableness", "conscientiousness", "openness", 
+ "education", "media")  
+
+med.nodes$label <- nodes.labels
+
+graph_sem(med1.fit, layout = med1.layout,
+          edges = edg_med1,
+          nodes = med.nodes)
+
+
+
+# vis 2: only with significant moderation paths:
+# beste momentane Idee: nach lavaan labels filtern?
+
+# layout 2
+
+med2.layout <- get_layout("neurot_mean_T1", "",  "", "", "", "",
+                          "", "", "", "Authority_mean_T1", "", "",
+                          "", "", "", "",  "", "",
+                          "", "", "", "",  "", "",
+                          "consc_mean_T1",  "", "", "PolCyn_mean_T1", "", "",
+                          "", "", "", "",  "BCTI_mean_T1", "OBL_mean_T1",
+                          "", "", "",  "SupDem_mean_T1", "", "",
+                          "", "", "",  "", "", "",
+                          "openness_mean_T1",  "", "", "HRCL_mean_T1", "", "",
+                          "", "", "", "", "",  "media_T1",
+                          rows = 10)
+
+edg2_med1 <- get_edges(med1.fit, label = "est_sig_std") %>%
+  filter(lavaan_label %in% c("a47", "a16", "a13", "a17", "a46", "a28", 
+                             "a26", "a37", "a23", "a42", "a36",
+                             "b1", "b2", "b3", "b4",
+                             "c1", "d1")) %>% 
+  mutate(color = "black",
+         color = replace(color, est_sig_std < 0, "red"))
+
+
+graph_sem(med1.fit, layout = med2.layout,
+          edges = edg2_med1, 
+          nodes = med.nodes)
+
+
+
+```
+
+Get combination of indirect effects per predictor and mediator
+
+```{r}
+
+
+med1.ind <- med1.ind# %>%
+  #filter(abs(z) > 2)
+
+
+ind_open <- med1.ind %>%
+              filter(str_detect(label, "open"))
+
+ind_age <- med1.ind %>%
+              filter(str_detect(label, "age"))
+
+ind_edu <- med1.ind %>%
+              filter(str_detect(label, "edu"))
+
+ind_ex <- med1.ind %>%
+              filter(str_detect(label, "ex"))
+
+ind_agree <- med1.ind %>%
+              filter(str_detect(label, "agree"))
+
+ind_neuro <- med1.ind %>%
+              filter(str_detect(label, "neuro"))
+
+ind_con <- med1.ind %>%
+              filter(str_detect(label, "con"))
+
+ind_SupDem <- med1.ind %>%
+              filter(str_detect(label, "SupD"))
+
+ind_HRCL <- med1.ind %>%
+              filter(str_detect(label, "HRCL"))
+
+ind_auth <- med1.ind %>%
+              filter(str_detect(label, "auth"))
+
+ind_PolCyn <- med1.ind %>%
+              filter(str_detect(label, "pol"))
+
+
+```
+
+Summate effects. (vllt. mit loop lösen)
+
+
+```{r}
+
+
+open_total <- sum(abs(ind_open["std.all"]))
+open_total
+
+neuro_total <- sum(abs(ind_neuro["std.all"]))
+neuro_total
+
+con_total <- sum(abs(ind_con["std.all"]))
+con_total
+
+ex_total <- sum(abs(ind_ex["std.all"]))
+ex_total
+
+agree_total <- sum(abs(ind_agree["std.all"]))
+agree_total
+
+age_total <- sum(abs(ind_age["std.all"]))
+age_total
+
+edu_total <- sum(abs(ind_edu["std.all"]))
+edu_total
+
+SupDem_total <- sum(abs(ind_SupDem["std.all"]))
+SupDem_total
+
+HRCL_total <- sum(abs(ind_HRCL["std.all"]))
+HRCL_total
+
+auth_total <- sum(abs(ind_auth["std.all"]))
+auth_total
+
+PolCyn_total <- sum(abs(ind_PolCyn["std.all"]))
+PolCyn_total
+
+
+
+```
